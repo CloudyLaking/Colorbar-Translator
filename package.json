@@ -1,0 +1,7 @@
+{
+  "name": "colorbar-translator",
+  "version": "1.0.1",
+  "private": true,
+  "description": "Offline image-to-colormap translator",
+  "scripts": {"test": "node --test tests/*.test.cjs"}
+}
