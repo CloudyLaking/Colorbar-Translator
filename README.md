@@ -30,7 +30,9 @@ RGB 重建误差只衡量抽取后的采样曲线，不是感知色差，也不�
 
 本地发行验收记录见 [RELEASE.md](RELEASE.md)。21 项核心测试覆盖检测、重建、导出及剪贴板操作。密集测试使用合成的 120 档气象配色，不代表任意截图的识别保证。公开发行包不包含第三方字体文件，优先使用设备已安装的 MiSans，否则使用系统中文字体。
 
-项目维护者为堡状云 / CloudyLake。在线体验：[云海观象台 · 色条翻译器](https://meteostation.top/colorbar-translator)。图片仅在浏览器本地处理；独立版本不需要账号、密钥或网站后端。
+项目维护者为堡状云 / CloudyLake。代码仓库：[CloudyLaking/Colorbar-Translator](https://github.com/CloudyLaking/Colorbar-Translator)。在线体验：[云海观象台 · 色条翻译器](https://meteostation.top/colorbar-translator)。图片仅在浏览器本地处理；独立版本不需要账号、密钥或网站后端。
+
+源代码按 [MIT 许可证](LICENSE)开放。`package.json` 中的 `private` 仅用于防止误发布到 npm，不影响 GitHub 仓库公开或代码使用权限。
 
 ## 第三方内容
 
