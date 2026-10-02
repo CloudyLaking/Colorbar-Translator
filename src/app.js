@@ -1,4 +1,6 @@
 'use strict';
+// Isolate tool bindings from the website's shared scripts and browser extensions.
+(()=>{
 const $=id=>document.getElementById(id);
 const engine=Colorbar, source=$('source'), ctx=source.getContext('2d');
 const bitmap=document.createElement('canvas'), bctx=bitmap.getContext('2d',{willReadFrequently:true});
@@ -6,13 +8,13 @@ const state={box:null,candidates:[],model:null,samples:null,drag:null,generation
 $('version').textContent='v'+engine.VERSION;
 
 // Clear stale output on every failed conversion, so old code cannot masquerade as new.
-function run(fn){try{$('error').textContent='';return fn();}catch(e){$('error').textContent=e.message;$('result').hidden=true;state.model=null;}}
+function run(fn){try{$('error').textContent='';return fn();}catch(e){$('error').textContent=e.message;$('code').value='';$('copy').disabled=$('download').disabled=true;state.model=null;}}
 function paintSelection(){ctx.drawImage(bitmap,0,0);if(state.box){const b=state.box;ctx.strokeStyle='#ffb300';ctx.lineWidth=Math.max(1,source.width/600);ctx.strokeRect(b.x,b.y,b.width,b.height);}}
 function convert(){run(()=>{
   if(!state.box)return;
   const b=state.box,vertical=$('orientation').value==='vertical'||($('orientation').value==='auto'&&b.height>b.width);
   const samples=engine.profile(bctx.getImageData(0,0,bitmap.width,bitmap.height),b,vertical);
-  const model=engine.extract(samples,{mode:$('mode').value,tolerance:Number($('tolerance').value),threshold:Number($('threshold').value),reverse:$('reverse').checked});
+  const model=engine.extract(samples,{mode:$('mode').value,tolerance:Number($('tolerance').value),threshold:Number($('threshold').value),reverse:$('reverse').checked,detail:$('detail').value,cleanLines:$('cleanLines').checked});
   model.range=[Number($('minimum').value),Number($('maximum').value)];model.scale=$('scale').value;model.rangeConfirmed=$('confirmed').checked;
   if(!model.rangeConfirmed){model.range=[0,1];model.scale='linear';}
   if($('bounds').value.trim()){
@@ -21,12 +23,16 @@ function convert(){run(()=>{
     model.bounds=$('bounds').value.trim().split(/[,，;\s]+/).map(Number);
   }
   engine.validate(model);state.model=model;state.samples=$('reverse').checked?[...samples].reverse():samples;
-  $('code').value=engine.exportCode(model,$('format').value);$('result').hidden=false;
+  $('code').value=engine.exportCode(model,$('format').value);$('result').hidden=false;$('empty-result').hidden=true;
+  $('copy').disabled=$('download').disabled=false;
   for(const id of ['original','reconstruction']){
     const c=$(id),context=c.getContext('2d');
     for(let x=0;x<c.width;x++){const t=x/(c.width-1),color=id==='original'?state.samples[Math.round(t*(samples.length-1))]:engine.evaluate(model,t);context.fillStyle=engine.hex(color);context.fillRect(x,0,1,c.height);}
   }
   $('metrics').textContent=`${model.mode==='continuous'?'连续渐变 · '+model.stops.length+' 个位置控制点':'分段色阶 · '+model.bands.length+' 个色块'} · RGB 重建均方根误差 ${model.error.rgbRms.toFixed(2)} / 最大误差 ${model.error.rgbMax.toFixed(2)} · ${model.rangeConfirmed?'数值范围已由用户确认':'数值范围未确认，仅归一化配色'}`;
+  $('metrics').textContent+=` · 排除分隔线像素 ${model.processing.removedSeparatorPixels} · 相对未处理截图 RMS ${model.error.originalRgbRms.toFixed(2)}`;
+  $('summary').textContent=model.processing.compactRamp?`密集分档已近似归纳为 ${model.stops.length} 个颜色节点。需要每一档时，可切换“逐级还原”。`:`已生成${model.mode==='continuous'?model.stops.length+' 个渐变节点':model.bands.length+' 个分段'}，请对照上方两条配色。`;
+  $('range-note').textContent=model.rangeConfirmed?`已确认范围：${model.range[0]} 至 ${model.range[1]}`:'当前仅导出配色，数值位置归一化为 0–1。';
 });}
 
 // Detection works on a bounded thumbnail; extraction always uses original image pixels.
@@ -60,7 +66,7 @@ async function load(file){
     for(const id of ['detect','whole','convert','readTicks'])$(id).disabled=false;
     $('tickSuggestion').textContent='数字识别只提供候选，不会覆盖当前数值。请核对负号、小数点、指数与读取方向。';
     detect();
-  }catch(e){run(()=>{throw e;});}
+  }catch(e){if(generation===state.generation)run(()=>{throw e;});}
 }
 function point(e){const r=source.getBoundingClientRect();return [Math.max(0,Math.min(source.width-1,Math.round((e.clientX-r.left)*source.width/r.width))),Math.max(0,Math.min(source.height-1,Math.round((e.clientY-r.top)*source.height/r.height)))];}
 source.addEventListener('pointerdown',e=>{state.drag=point(e);source.setPointerCapture(e.pointerId);});
@@ -69,10 +75,20 @@ source.addEventListener('pointerup',()=>{if(state.drag){state.drag=null;$('bound
 source.addEventListener('pointercancel',()=>state.drag=null);
 $('file').addEventListener('change',e=>load(e.target.files[0]));
 $('drop').addEventListener('dragover',e=>e.preventDefault());$('drop').addEventListener('drop',e=>{e.preventDefault();load(e.dataTransfer.files[0]);});
-document.addEventListener('paste',e=>{const item=[...e.clipboardData.items].find(v=>v.type.startsWith('image/'));if(item)load(item.getAsFile());});
+document.addEventListener('paste',e=>{const file=ColorbarClipboard.imageFile(e.clipboardData);if(file){e.preventDefault();load(file);}else if(!e.target.closest('input,textarea,[contenteditable]'))$('status').textContent='剪贴板中没有图片。请复制图片本身或截图，也可选择图片文件。';});
+// Explicit user gesture only; denial never blocks keyboard paste or file selection.
+$('paste').onclick=async()=>{
+  try{
+    if(!navigator.clipboard?.read)throw Error('此浏览器不支持直接读取剪贴板，请点击图片区域后按 Ctrl+V / ⌘V，或选择图片。');
+    const items=await navigator.clipboard.read();
+    for(const item of items){const type=item.types.find(v=>/^image\/(png|jpeg|webp|bmp)$/.test(v));if(type){await load(await item.getType(type));return;}}
+    $('status').textContent='剪贴板中没有图片。请复制图片本身，而不是图片链接。';
+  }catch(e){$('status').textContent=e.name==='NotAllowedError'?'浏览器未允许直接读取。请点击图片区域后按 Ctrl+V / ⌘V，或选择图片。':e.message;}
+};
 $('detect').onclick=detect;$('whole').onclick=()=>{state.box={x:0,y:0,width:bitmap.width,height:bitmap.height};paintSelection();convert();};
 $('candidate').onchange=()=>{state.box=state.candidates[Number($('candidate').value)].box;paintSelection();convert();};
-for(const id of ['mode','orientation','tolerance','threshold','minimum','maximum','scale','format','reverse','confirmed','bounds'])$(id).addEventListener('change',convert);
+for(const id of ['mode','orientation','tolerance','threshold','minimum','maximum','scale','format','reverse','confirmed','bounds','detail','cleanLines'])$(id).addEventListener('change',convert);
+for(const id of ['tolerance','threshold','minimum','maximum','bounds'])$(id).addEventListener('input',convert);
 $('convert').onclick=convert;
 // OCR is advisory: monotonicity and glyph matching do not establish physical truth.
 $('readTicks').onclick=()=>run(()=>{
@@ -91,3 +107,4 @@ $('demo').onclick=()=>{
   const g=x.createLinearGradient(30,0,790,0);[[0,'#19275d'],[.18,'#187da0'],[.43,'#d4f4ef'],[.5,'#fffaf0'],[.72,'#edba52'],[1,'#aa1d3c']].forEach(v=>g.addColorStop(...v));x.fillStyle=g;x.fillRect(30,45,760,52);x.fillStyle='#334';x.font='18px sans-serif';x.fillText('Continuous gradient · non-uniform stops',30,135);
   c.toBlob(b=>load(new File([b],'example.png',{type:'image/png'})));
 };
+})();

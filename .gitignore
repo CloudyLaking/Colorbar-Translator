@@ -3,3 +3,10 @@ dist/
 coverage/
 *.log
 .DS_Store
+assets/*.woff2
+assets/*License.pdf
+.env
+.env.*
+!.env.example
+__pycache__/
+*.pyc

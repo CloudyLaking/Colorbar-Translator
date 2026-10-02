@@ -64,20 +64,114 @@
     });
   }
 
+  // Remove only repeated, narrow, dark separator strokes, never a broad black band.
+  function removeSeparators(samples) {
+    const runs=segments(samples,3), candidates=[];
+    for(let i=1;i<runs.length-1;i++) {
+      const run=runs[i],a=Math.round(run.start*samples.length),b=Math.round(run.end*samples.length);
+      if(b-a>2)continue;
+      const left=rgb(runs[i-1].color),right=rgb(runs[i+1].color),ink=rgb(run.color);
+      const middle=mix(left,right,.5);
+      if(distance(left,right)<85 && middle.reduce((s,v)=>s+v,0)-ink.reduce((s,v)=>s+v,0)>55
+          && distance(ink,left)>20 && distance(ink,right)>20)candidates.push({a,b,left,right});
+    }
+    // A lone narrow dark colour may be meaningful. Require repeated grid-like strokes.
+    if(candidates.length<5)return {samples,removed:0};
+    const gaps=candidates.slice(1).map((v,i)=>v.a-candidates[i].a),typical=median([...gaps]);
+    if(typical<4 || gaps.filter(v=>v>=typical*.5&&v<=typical*2.5).length/gaps.length<.7)return {samples,removed:0};
+    const clean=samples.map(v=>[...v]);
+    for(const {a,b,left,right} of candidates)for(let i=a;i<b;i++)clean[i]=i-a<(b-a)/2?left:right;
+    // A terminal frame stroke is removable only if it matches the repeated ink
+    // and its grid spacing; an ordinary black endpoint stays untouched.
+    const ink=[0,1,2].map(k=>median(candidates.map(v=>samples[v.a][k])));
+    const last=runs.at(-1),start=Math.round(last.start*samples.length);
+    const gap=start-candidates.at(-1).a;
+    let terminal=0;
+    if(samples.length-start<=2 && Math.abs(gap-typical)<2 && distance(rgb(last.color),ink)<15 && distance(samples[start-1],ink)>20){
+      for(let i=start;i<samples.length;i++){clean[i]=[...clean[start-1]];terminal++;}
+    }
+    // The repeated drawing grid also identifies plateau interiors in JPEGs,
+    // where ringing otherwise fragments one intended band into many colours.
+    const cuts=[0,...candidates.map(v=>v.b),samples.length];
+    const plateaus=cuts.slice(0,-1).map((a,i)=>{
+      const b=cuts[i+1],pad=Math.min(2,Math.floor((b-a-1)/3));
+      const inside=samples.slice(a+pad,b-pad);
+      return {start:a/samples.length,end:b/samples.length,color:hex([0,1,2].map(k=>median(inside.map(c=>c[k]))))};
+    });
+    return {samples:clean,removed:terminal+candidates.reduce((s,v)=>s+v.b-v.a,0),plateaus};
+  }
+
+  // Dense stepped ramps often encode a few colour anchors. Fit plateau centres,
+  // preserving sharp jumps with adjacent knots rather than smoothing across them.
+  function compactRamp(samples,tolerance,plateaus=null) {
+    // Quantized pixels in a genuinely smooth gradient are not discrete bands.
+    const flatShare=samples.slice(1).filter((v,i)=>distance(v,samples[i])<1).length/(samples.length-1);
+    if(!plateaus && flatShare<.45)return null;
+    // Three-pixel medians suppress JPEG ringing without averaging colour jumps.
+    const filtered=samples.map((v,i)=>[0,1,2].map(k=>median(samples.slice(Math.max(0,i-1),Math.min(samples.length,i+2)).map(c=>c[k]))));
+    let bands=segments(filtered,Math.max(3,tolerance*2));
+    const coverage=bands.filter(b=>(b.end-b.start)*samples.length>=3).reduce((s,b)=>s+b.end-b.start,0);
+    if(plateaus && (coverage<.88 || bands.length>samples.length/3))bands=plateaus;
+    if(bands.length<16 || bands.length>samples.length/3)return null;
+    const stable=bands.filter(b=>(b.end-b.start)*samples.length>=3);
+    if(stable.reduce((s,b)=>s+b.end-b.start,0)<.88)return null;
+    const anchors=bands.map(b=>({position:(b.start+b.end)/2,color:rgb(b.color)}));
+    const changes=anchors.slice(1).map((v,i)=>distance(v.color,anchors[i].color));
+    const jumpLimit=Math.max(40,median([...changes])*3.5),knots=[];
+    knots.push({position:0,color:anchors[0].color});
+    for(let i=0;i<anchors.length;i++) {
+      if(i && changes[i-1]>jumpLimit) {
+        const edge=bands[i].start,epsilon=.25/samples.length;
+        knots.push({position:edge-epsilon,color:anchors[i-1].color},{position:edge+epsilon,color:anchors[i].color});
+      }
+      knots.push(anchors[i]);
+    }
+    knots.push({position:1,color:anchors.at(-1).color});
+    const keep=new Set([0,knots.length-1]),stack=[[0,knots.length-1]];
+    while(stack.length) {
+      const [a,b]=stack.pop();let worst=tolerance,index=-1;
+      for(let i=a+1;i<b;i++) {
+        const t=(knots[i].position-knots[a].position)/(knots[b].position-knots[a].position);
+        const error=distance(knots[i].color,mix(knots[a].color,knots[b].color,t));
+        if(error>worst){worst=error;index=i;}
+      }
+      if(index>=0){keep.add(index);stack.push([a,index],[index,b]);}
+    }
+    const stops=[...keep].sort((a,b)=>a-b).map(i=>({position:knots[i].position,color:hex(knots[i].color)}));
+    return stops.length<bands.length*.65?{stops,bands:bands.length}:null;
+  }
+
   // Auto mode is conservative: smooth changes must not become hundreds of bands.
-  function extract(samples, {mode='auto', tolerance=2, threshold=8, reverse=false}={}) {
+  function extract(samples, {mode='auto', tolerance=2, threshold=8, reverse=false, detail='faithful', cleanLines=false}={}) {
     if(samples.length<2) throw Error('色条过短。');
     if(!Number.isFinite(threshold)||threshold<=0||threshold>80||!Number.isFinite(tolerance)||tolerance<0||tolerance>30) throw Error('误差须为 0–30，分段阈值须大于 0 且不超过 80。');
     if(reverse) samples=[...samples].reverse();
+    const original=samples;
+    const cleaned=cleanLines?removeSeparators(samples):{samples,removed:0};
+    samples=cleaned.samples;
+    const compact=detail==='compact' && mode!=='discrete'?compactRamp(samples,Math.max(2,tolerance),cleaned.plateaus):null;
     const bands=segments(samples,threshold);
     const plateauPixels=bands.filter(b=>(b.end-b.start)*samples.length>=3).reduce((s,b)=>s+b.end-b.start,0);
     const changes=samples.slice(1).map((v,i)=>distance(v,samples[i]));
     const totalChange=changes.reduce((a,b)=>a+b,0);
     const jumpShare=changes.filter(v=>v>threshold).reduce((a,b)=>a+b,0)/Math.max(1,totalChange);
-    if(mode==='auto') mode=bands.length<=64 && plateauPixels>.95 && (jumpShare>.6||totalChange<1) ? 'discrete':'continuous';
+    // Broad flat bands may dominate the total change while a short genuine
+    // gradient remains between them. Preserve that gradient rather than voting
+    // solely by the fraction of sharp jumps across the complete colour bar.
+    let mixedGradient=false;
+    for(let a=0;a+12<samples.length && !mixedGradient;a+=4){
+      const b=a+12, span=distance(samples[a],samples[b]);
+      if(span<Math.max(12,tolerance*4))continue;
+      const part=samples.slice(a,b+1);
+      if(new Set(part.map(hex)).size<5)continue;
+      mixedGradient=part.every((colour,i)=>distance(colour,mix(samples[a],samples[b],i/12))<=Math.max(3,tolerance*2));
+    }
+    if(mode==='auto') mode=!mixedGradient && bands.length<=64 && plateauPixels>.95 && (jumpShare>.6||totalChange<1) ? 'discrete':'continuous';
+    if(compact)mode='continuous';
     if(!['continuous','discrete'].includes(mode)) throw Error('未知模式。');
     const model={version:VERSION,mode,range:[0,1],scale:'linear',rangeConfirmed:false,
-      stops:mode==='continuous'?simplify(samples,tolerance):[],bands:mode==='discrete'?bands:[]};
+      stops:mode==='continuous'?(compact?.stops||simplify(samples,tolerance)):[],bands:mode==='discrete'?bands:[],
+      processing:{removedSeparatorPixels:cleaned.removed,compactRamp:Boolean(compact),mixedGradient,sourceBands:compact?.bands||bands.length}};
     if(mode==='discrete' && bands.length>256) throw Error('识别出超过 256 个分段，可能是渐变色条；请改用连续模式。');
     let sum=0,max=0;
     for(let i=0;i<samples.length;i++) {
@@ -85,6 +179,9 @@
       sum+=error*error;max=Math.max(max,error);
     }
     model.error={rgbRms:Math.sqrt(sum/samples.length),rgbMax:max};
+    let originalSum=0;
+    for(let i=0;i<original.length;i++)originalSum+=distance(original[i],evaluate(model,i/(original.length-1)))**2;
+    model.error.originalRgbRms=Math.sqrt(originalSum/original.length);
     return model;
   }
 
@@ -144,5 +241,5 @@
     if(format==='javascript') return `// Colorbar Translator ${VERSION}\nconst colorbar = ${JSON.stringify({...model,bounds},null,2)};\n`;
     throw Error('未知导出格式。');
   }
-  return {VERSION,profile,simplify,segments,extract,evaluate,exportCode,entries,hex,validate};
+  return {VERSION,profile,simplify,segments,extract,evaluate,exportCode,entries,hex,validate,removeSeparators,compactRamp};
 });
